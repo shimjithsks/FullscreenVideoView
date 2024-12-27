@@ -1,0 +1,141 @@
+package com.example.tiffprocessing
+
+import android.content.Intent
+import android.graphics.Bitmap
+import android.net.Uri
+import android.os.Bundle
+import android.provider.MediaStore
+import android.util.Log
+import android.widget.Button
+import android.widget.ImageView
+import android.widget.TextView
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import org.opencv.android.OpenCVLoader
+import org.opencv.android.Utils
+import org.opencv.core.Mat
+import org.opencv.core.Size
+import org.opencv.imgcodecs.Imgcodecs
+import org.opencv.imgproc.Imgproc
+import java.io.File
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var imageView: ImageView
+    private lateinit var uploadButton: Button
+    private lateinit var sizeTextView: TextView
+    private var outputImagePath: String = ""
+
+    // Activity result launcher for image selection
+    private lateinit var imagePickerLauncher: ActivityResultLauncher<Intent>
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        // Initialize OpenCV
+        if (!OpenCVLoader.initDebug()) {
+            Log.e("OpenCV", "Failed to initialize OpenCV!")
+            return
+        }
+        Log.d("OpenCV", "OpenCV initialized successfully!")
+
+        // Initialize UI components
+        imageView = findViewById(R.id.imageView)
+        uploadButton = findViewById(R.id.uploadButton)
+        sizeTextView = findViewById(R.id.sizeTextView)
+
+        // Initialize image picker launcher
+        imagePickerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == RESULT_OK) {
+                val selectedImageUri = result.data?.data
+                if (selectedImageUri != null) {
+                    handleImageSelection(selectedImageUri)
+                }
+            }
+        }
+
+        // Set up button click listener
+        uploadButton.setOnClickListener {
+            openImagePicker()
+        }
+    }
+
+    private fun openImagePicker() {
+        val intent = Intent(Intent.ACTION_GET_CONTENT)
+        intent.type = "image/*"
+        imagePickerLauncher.launch(intent)
+    }
+
+    private fun handleImageSelection(imageUri: Uri) {
+        try {
+            // Get file path from URI
+            val inputStream = contentResolver.openInputStream(imageUri)
+            val tempFile = File.createTempFile("selected_image", ".tiff", cacheDir)
+            inputStream?.use { input ->
+                tempFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+
+            // Display original file size
+            val originalSize = tempFile.length() / 1024 // Size in KB
+            sizeTextView.text = "Original Size: ${originalSize} KB"
+
+            // Set output path for the converted image
+            outputImagePath = "${cacheDir}/converted_image.tiff"
+
+            // Process the TIFF image
+            val convertedBitmap = processAndConvertTiff(tempFile.absolutePath)
+            if (convertedBitmap != null) {
+                // Display the converted image in the ImageView
+                imageView.setImageBitmap(convertedBitmap)
+
+                // Display converted file size
+                val convertedFile = File(outputImagePath)
+                val convertedSize = convertedFile.length() / 1024 // Size in KB
+                sizeTextView.append("\nConverted Size: ${convertedSize} KB")
+            }
+        } catch (e: Exception) {
+            Log.e("Image Selection", "Error handling selected image: ${e.message}")
+        }
+    }
+
+    private fun processAndConvertTiff(inputPath: String): Bitmap? {
+        // Step 1: Read the TIFF image
+        val originalImage: Mat = Imgcodecs.imread(inputPath)
+        if (originalImage.empty()) {
+            Log.e("TIFF Processing", "Failed to load TIFF image!")
+            return null
+        }
+        Log.d("TIFF Processing", "TIFF image loaded successfully!")
+
+        // Step 2: Resize the image
+        val resizedImage = Mat()
+        val newSize = Size(originalImage.cols() * 0.5, originalImage.rows() * 0.5)
+        Imgproc.resize(originalImage, resizedImage, newSize)
+
+        // Step 3: Convert to grayscale
+        val grayImage = Mat()
+        Imgproc.cvtColor(resizedImage, grayImage, Imgproc.COLOR_BGR2GRAY)
+
+        // Step 4: Save the converted image with compression
+        val compressionParams = listOf(
+            Imgcodecs.IMWRITE_TIFF_COMPRESSION, Imgcodecs.TIFF_LZW
+        )
+        val success = Imgcodecs.imwrite(outputImagePath, grayImage, compressionParams)
+
+        if (success) {
+            Log.d("TIFF Saving", "Converted TIFF image saved at: $outputImagePath")
+
+            // Convert Mat to Bitmap for display
+            val bitmap = Bitmap.createBitmap(grayImage.cols(), grayImage.rows(), Bitmap.Config.ARGB_8888)
+            Utils.matToBitmap(grayImage, bitmap)
+            return bitmap
+        } else {
+            Log.e("TIFF Saving", "Failed to save converted TIFF image!")
+            return null
+        }
+    }
+}
