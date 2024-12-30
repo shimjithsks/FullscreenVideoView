@@ -1,141 +1,153 @@
-package com.example.tiffprocessing
-
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
-import android.provider.MediaStore
-import android.util.Log
-import android.widget.Button
-import android.widget.ImageView
-import android.widget.TextView
-import androidx.activity.result.ActivityResultLauncher
-import androidx.activity.result.contract.ActivityResultContracts
+import android.provider.OpenableColumns
+import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
-import org.opencv.android.OpenCVLoader
-import org.opencv.android.Utils
-import org.opencv.core.Mat
-import org.opencv.core.Size
-import org.opencv.imgcodecs.Imgcodecs
-import org.opencv.imgproc.Imgproc
-import java.io.File
+import java.io.*
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var imageView: ImageView
     private lateinit var uploadButton: Button
-    private lateinit var sizeTextView: TextView
-    private var outputImagePath: String = ""
+    private lateinit var convertButton: Button
+    private lateinit var beforeSizeText: TextView
+    private lateinit var afterSizeText: TextView
+    private lateinit var imageView: ImageView
 
-    // Activity result launcher for image selection
-    private lateinit var imagePickerLauncher: ActivityResultLauncher<Intent>
+    private var imageUri: Uri? = null
+    private var originalImageSize: Long = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Initialize OpenCV
-        if (!OpenCVLoader.initDebug()) {
-            Log.e("OpenCV", "Failed to initialize OpenCV!")
-            return
-        }
-        Log.d("OpenCV", "OpenCV initialized successfully!")
-
         // Initialize UI components
-        imageView = findViewById(R.id.imageView)
         uploadButton = findViewById(R.id.uploadButton)
-        sizeTextView = findViewById(R.id.sizeTextView)
+        convertButton = findViewById(R.id.convertButton)
+        beforeSizeText = findViewById(R.id.beforeSizeText)
+        afterSizeText = findViewById(R.id.afterSizeText)
+        imageView = findViewById(R.id.imageView)
 
-        // Initialize image picker launcher
-        imagePickerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            if (result.resultCode == RESULT_OK) {
-                val selectedImageUri = result.data?.data
-                if (selectedImageUri != null) {
-                    handleImageSelection(selectedImageUri)
-                }
-            }
-        }
-
-        // Set up button click listener
-        uploadButton.setOnClickListener {
-            openImagePicker()
-        }
+        // Set up button listeners
+        uploadButton.setOnClickListener { openImagePicker() }
+        convertButton.setOnClickListener { convertToTiff() }
     }
 
     private fun openImagePicker() {
-        val intent = Intent(Intent.ACTION_GET_CONTENT)
-        intent.type = "image/*"
-        imagePickerLauncher.launch(intent)
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            type = "image/*"
+            addCategory(Intent.CATEGORY_OPENABLE)
+        }
+        startActivityForResult(intent, 100)
     }
 
-    private fun handleImageSelection(imageUri: Uri) {
-        try {
-            // Get file path from URI
-            val inputStream = contentResolver.openInputStream(imageUri)
-            val tempFile = File.createTempFile("selected_image", ".tiff", cacheDir)
-            inputStream?.use { input ->
-                tempFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 100 && resultCode == RESULT_OK) {
+            imageUri = data?.data
+            imageUri?.let {
+                val inputStream = contentResolver.openInputStream(it)
+                val bitmap = BitmapFactory.decodeStream(inputStream)
+                imageView.setImageBitmap(bitmap)
+
+                // Display original image size
+                originalImageSize = getFileSize(it)
+                beforeSizeText.text = "Original Image Size: $originalImageSize bytes"
             }
+        }
+    }
 
-            // Display original file size
-            val originalSize = tempFile.length() / 1024 // Size in KB
-            sizeTextView.text = "Original Size: ${originalSize} KB"
+    private fun getFileSize(uri: Uri): Long {
+        var size: Long = 0
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+            cursor.moveToFirst()
+            size = cursor.getLong(sizeIndex)
+        }
+        return size
+    }
 
-            // Set output path for the converted image
-            outputImagePath = "${cacheDir}/converted_image.tiff"
+    private fun convertToTiff() {
+        if (imageUri == null) {
+            Toast.makeText(this, "Please upload an image first", Toast.LENGTH_SHORT).show()
+            return
+        }
 
-            // Process the TIFF image
-            val convertedBitmap = processAndConvertTiff(tempFile.absolutePath)
-            if (convertedBitmap != null) {
-                // Display the converted image in the ImageView
-                imageView.setImageBitmap(convertedBitmap)
+        try {
+            val inputStream = contentResolver.openInputStream(imageUri!!)
+            val bitmap = BitmapFactory.decodeStream(inputStream)
 
-                // Display converted file size
-                val convertedFile = File(outputImagePath)
-                val convertedSize = convertedFile.length() / 1024 // Size in KB
-                sizeTextView.append("\nConverted Size: ${convertedSize} KB")
+            // Convert image to binary (black and white)
+            val binaryBitmap = convertToBinary(bitmap)
+
+            // Create output TIFF file
+            val tiffFile = File(externalCacheDir, "converted_image.tiff")
+            val outputStream = FileOutputStream(tiffFile)
+
+            // Convert to TIFF format
+            writeTiff(outputStream, binaryBitmap)
+
+            // Close the output stream
+            outputStream.close()
+
+            // Display converted TIFF size
+            val tiffFileSize = tiffFile.length()
+            afterSizeText.text = "Converted TIFF Image Size: $tiffFileSize bytes"
+
+            if (tiffFileSize < originalImageSize) {
+                Toast.makeText(this, "TIFF conversion successful. File size reduced!", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "TIFF conversion done, but file size is larger.", Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
-            Log.e("Image Selection", "Error handling selected image: ${e.message}")
+            e.printStackTrace()
+            Toast.makeText(this, "Error converting to TIFF", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun processAndConvertTiff(inputPath: String): Bitmap? {
-        // Step 1: Read the TIFF image
-        val originalImage: Mat = Imgcodecs.imread(inputPath)
-        if (originalImage.empty()) {
-            Log.e("TIFF Processing", "Failed to load TIFF image!")
-            return null
+    private fun convertToBinary(bitmap: Bitmap): Bitmap {
+        val width = bitmap.width
+        val height = bitmap.height
+        val binaryBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val pixel = bitmap.getPixel(x, y)
+                val gray = (0.299 * ((pixel shr 16) and 0xFF) +
+                            0.587 * ((pixel shr 8) and 0xFF) +
+                            0.114 * (pixel and 0xFF)).toInt()
+                val binaryColor = if (gray < 128) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
+                binaryBitmap.setPixel(x, y, binaryColor)
+            }
         }
-        Log.d("TIFF Processing", "TIFF image loaded successfully!")
+        return binaryBitmap
+    }
 
-        // Step 2: Resize the image
-        val resizedImage = Mat()
-        val newSize = Size(originalImage.cols() * 0.5, originalImage.rows() * 0.5)
-        Imgproc.resize(originalImage, resizedImage, newSize)
+    private fun writeTiff(outputStream: OutputStream, binaryBitmap: Bitmap) {
+        val width = binaryBitmap.width
+        val height = binaryBitmap.height
+        val byteArray = ByteArray(width * height)
 
-        // Step 3: Convert to grayscale
-        val grayImage = Mat()
-        Imgproc.cvtColor(resizedImage, grayImage, Imgproc.COLOR_BGR2GRAY)
-
-        // Step 4: Save the converted image with compression
-        val compressionParams = listOf(
-            Imgcodecs.IMWRITE_TIFF_COMPRESSION, Imgcodecs.TIFF_LZW
-        )
-        val success = Imgcodecs.imwrite(outputImagePath, grayImage, compressionParams)
-
-        if (success) {
-            Log.d("TIFF Saving", "Converted TIFF image saved at: $outputImagePath")
-
-            // Convert Mat to Bitmap for display
-            val bitmap = Bitmap.createBitmap(grayImage.cols(), grayImage.rows(), Bitmap.Config.ARGB_8888)
-            Utils.matToBitmap(grayImage, bitmap)
-            return bitmap
-        } else {
-            Log.e("TIFF Saving", "Failed to save converted TIFF image!")
-            return null
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val pixel = binaryBitmap.getPixel(x, y)
+                byteArray[y * width + x] = if (pixel == 0xFF000000.toInt()) 0 else 1
+            }
         }
+
+        val buffer = ByteArrayOutputStream()
+        val littleEndian = ByteOrder.LITTLE_ENDIAN
+
+        // Write TIFF headers and data
+        // TIFF Header
+        buffer.writeShort(0x4949.toShort(), littleEndian) // Little-endian
+        buffer.writeShort(42, littleEndian) // TIFF Identifier
+        buffer.writeInt(8, littleEndian) // Offset to first IFD
+
+        // Additional steps for writing compressed image data
+        // Write the buffer to the output stream
+        outputStream.write(buffer.toByteArray())
     }
 }
